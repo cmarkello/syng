@@ -147,3 +147,176 @@ bases
 
 > ONEview -H cichlid.1gbwt  // -H shows only the header, with the schema and object statistics
 ```
+
+# syngpanrna
+
+Splice-junction injector for the [syng](https://github.com/richarddurbin/syng) pangenome
+toolkit.  Extends a syncmer-based pangenome (`.1khash` + `.1path` + `.1gbwt`) with
+transcript annotation to produce a **spliced pangenome graph** and
+**pantranscriptome** in native syng ONEcode format.
+
+---
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `syngpanrna.c` | Main binary — reads syng outputs + GTF/GFF3, writes spliced outputs |
+| `gtfparse.c` | GTF/GFF3 parser and BED intron database parser |
+| `gtfparse.h` | Header for `gtfparse.c` |
+| `syng_schema_addition.h` | Documents the three new ONEcode line types (`T`, `N`, `G`) added to `syng.h` |
+| `Makefile.additions` | Lines to add to the existing syng `Makefile` |
+| `run_syngpanrna.sh` | Shell wrapper for running the full pipeline |
+
+---
+
+## Prerequisites
+
+All of the following must be available before building or running `syngpanrna`:
+
+- The [syng](https://github.com/richarddurbin/syng) source tree (cloned alongside this directory, or this directory placed inside it)
+- `samtools` on PATH — used for region extraction from bgzipped/indexed FASTA files
+- A GTF or GFF3 annotation file (e.g. GENCODE, Ensembl) for the target chromosome
+- The per-haplotype chromosome FASTA files produced by `extract_hprc_contigs.sh`
+- The syng pangenome files produced by `run_syng.sh` (`.1khash` + `.1path`)
+
+---
+
+## Building
+
+```bash
+cd syng   # the syng source directory
+cp /path/to/syngpanrna/{syngpanrna.c,gtfparse.c,gtfparse.h} .
+# apply the Makefile additions (see above)
+make syngpanrna
+```
+
+---
+
+## Running
+
+### Quick start
+
+```bash
+./run_syngpanrna.sh \
+    -c chr21 \
+    -a gencode.v47.chr21.gtf \
+    -w ./hprc_work \
+    -s ./syng_out \
+    -o ./panrna_out
+```
+
+### Direct invocation
+
+```bash
+syngpanrna \
+    -K ./syng_out/chr21.1khash \
+    -p ./syng_out/chr21.1path \
+    -f ./hprc_work \
+    -o ./panrna_out/chr21 \
+    --chrom chr21 \
+    --write-info ./panrna_out/chr21.tx_info.tsv \
+    gencode.v47.chr21.gtf
+```
+
+### With an intron BED database (e.g. from STAR SJ.out.tab)
+
+```bash
+syngpanrna \
+    -K ./syng_out/chr21.1khash \
+    -p ./syng_out/chr21.1path \
+    -f ./hprc_work \
+    -o ./panrna_out/chr21 \
+    --chrom chr21 \
+    --introns chr21_introns.bed \
+    --collapse \
+    gencode.v47.chr21.gtf
+```
+
+---
+
+## Output files
+
+All outputs are written to `<prefix>.*`:
+
+| File | Contents |
+|------|----------|
+| `<prefix>.spliced.1khash` | Augmented syncmer hash table (original genomic syncmers + junction-spanning syncmers from transcript exon boundaries) |
+| `<prefix>.spliced.1path` | All paths: original genomic haplotype paths **plus** per-(transcript, haplotype) transcript paths |
+| `<prefix>.spliced.1gbwt` | GBWT built from `spliced.1path` — encodes the full spliced pangenome as a run-length-compressed BWT over syncmers |
+| `<prefix>.tx.1path` | Transcript paths only (subset of `spliced.1path`) — used for pantranscriptome quantification |
+| `<prefix>.tx_info.tsv` | Per-path metadata: `path_index`, `tx_id`, `gene_id`, `sample`, `haplotype`, `chrom`, `strand`, `spliced_len` (written when `--write-info` is set) |
+
+---
+
+## How it works
+
+### Junction-spanning syncmers
+
+syng's syncmer graph is implicit: nodes are fixed-length k-mers and the graph
+structure is encoded only in the paths.  There is no coordinate index.
+
+When two exons are concatenated to form a spliced transcript sequence, the
+syncmer iterator naturally generates novel k-mers at the exon–exon boundary —
+those whose `w+k`-base window straddles the splice site.  These
+**junction-spanning syncmers** do not appear in any genomic path.  They are
+added to the `.1khash` as new entries and appear only in transcript paths.
+
+This means:
+- Splice junctions are encoded implicitly by the presence of junction syncmers
+  in a path, with no need to modify the graph topology.
+- RNA-seq reads that cross a splice junction will contain junction syncmers,
+  making them alignable to transcript paths in the GBWT.
+- Transcript quantification can be performed by counting path-posterior
+  probabilities through the GBWT over junction syncmers (future work).
+
+### Coordinate resolution
+
+GTF annotations use reference genome coordinates (GRCh38 / T2T-CHM13).
+The HPRC haplotype assemblies are not aligned to a reference by construction.
+**The reference genome assembly must therefore be included as an additional
+haplotype in the syng pangenome** (i.e., listed as one of the `-s` samples
+in `run_syng.sh`, or added separately) so that its sequence can be used to
+extract exon regions at reference coordinates.
+
+For the HPRC release 2 assemblies, T2T-CHM13 is the natural reference choice.
+
+### ONEcode schema additions
+
+Three new optional line types are added to the `path` object schema in `syng.h`:
+
+```
+T  tx_index  gene_index  hap_id     — marks a path as a transcript path
+N  tx_id_string                     — transcript ID string table entry
+G  gene_id_string                   — gene ID string table entry
+```
+
+Genomic haplotype paths (produced by `syng`) never have a `T` line.
+Transcript paths (produced by `syngpanrna`) always have one.
+Tools that do not understand `T`/`N`/`G` will ignore them; this is backward
+compatible with all existing syng tools.
+
+---
+
+## Known limitations
+
+- **Coordinate system**: GTF exon coordinates must be in the same coordinate
+  space as the FASTA sequences used.  For HPRC samples this means including
+  the reference genome as a haplotype and ensuring the annotation matches the
+  reference chromosome name.
+
+- **Splice sites inside syncmers**: Because syncmers are ~63 bp, a splice site
+  may fall within a syncmer rather than between two.  That syncmer is absent
+  from the spliced sequence (replaced by junction-spanning syncmers), so reads
+  mapping very close to but not crossing a junction may align to genomic paths
+  rather than transcript paths.
+
+- **Transcript quantification**: This release provides the data structures
+  (junction syncmers, GBWT transcript paths, `tx_info.tsv`) but not a
+  quantification tool.  An EM-based transcript expression estimator against
+  the `.spliced.1gbwt` and `syngmap` alignments is planned.
+
+- **Memory**: Building the GBWT over all transcript paths for many haplotypes
+  can require substantial RAM.  For a whole chromosome with 100 haplotypes and
+  a large annotation, expect 10–50 GB.  Use `--collapse` to reduce redundancy.
+

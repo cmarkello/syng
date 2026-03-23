@@ -3,7 +3,7 @@
 CFLAGS = -O3
 #CFLAGS = -g	# for debugging
 
-ALL = syng syngpath2gbwt ONEview syngmap syngstat k31type
+ALL = syng syngpath2gbwt ONEview syngmap syngstat k31type syngpanrna
 
 DESTDIR = ~/bin
 
@@ -53,6 +53,9 @@ syncmerset.o: syncmerset.c syncmerset.h $(UTILS_HEADERS) ONElib.h
 ONElib.o: ONElib.c ONElib.h 
 	$(CC) $(CFLAGS) -c $^
 
+gtfparse.o: gtfparse.c gtfparse.h $(UTILS_HEADERS)
+	$(CC) $(CFLAGS) -c gtfparse.c
+
 ### programs
 
 syng: syng.c syngbwt3.o rskip.o syncmerset.o seqio.o seqhash.o kmerhash.o ONElib.o $(UTILS_OBJS)
@@ -79,6 +82,14 @@ k31type: k31type.c seqio.o ONElib.o $(UTILS_OBJS)
 
 ONEview: ONEview.c ONElib.o
 	$(CC) $(CFLAGS) -o $@ $^ -lz
+
+syngpanrna: syngpanrna.c gtfparse.o syngbwt3.o rskip.o syncmerset.o \
+            seqio.o seqhash.o kmerhash.o ONElib.o $(UTILS_OBJS) syng_patched.h
+	$(CC) $(CFLAGS) $(SEQIO_OPTS) \
+	      -include syng_patched.h \
+	      -o $@ syngpanrna.c gtfparse.o syngbwt3.o rskip.o syncmerset.o \
+	              seqio.o seqhash.o kmerhash.o ONElib.o $(UTILS_OBJS) \
+	      -lpthread $(SEQIO_LIBS)
 
 ### test
 
