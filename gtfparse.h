@@ -31,7 +31,7 @@ typedef struct {
 
 /* ── Parse a GTF or GFF3 annotation file ───────────────────────────────── *
  *
- * Returns an Array* of TranscriptModel* (caller owns all memory).
+ * Returns an Array of TranscriptModel* (caller owns all memory).
  * Only lines whose feature column (col 3) equals featureType are parsed.
  * transcriptTag is the attribute key used to extract transcript IDs
  * (GTF default: "transcript_id"; GFF3 common alternative: "Parent").
@@ -40,7 +40,7 @@ typedef struct {
  * Transcripts are sorted by (chrom, txId).
  * Returns NULL and prints an error on failure.
  */
-Array *gtfParse (const char *fname,
+Array gtfParse (const char *fname,
                  const char *featureType,    /* NULL → "exon"          */
                  const char *transcriptTag   /* NULL → "transcript_id" */
                  ) ;
@@ -55,12 +55,12 @@ Array *gtfParse (const char *fname,
  * Strand is read from column 6 if present, otherwise defaults to '+'.
  * Returns an Array* of TranscriptModel* or NULL on failure.
  */
-Array *intronBedParse (const char *fname) ;
+Array intronBedParse (const char *fname) ;
 
 /* ── Free a single TranscriptModel and its contents ────────────────────── */
 void transcriptModelDestroy (TranscriptModel *tm) ;
 
 /* ── Free the entire array returned by gtfParse / intronBedParse ────────── */
-void transcriptModelArrayDestroy (Array *models) ;
+void transcriptModelArrayDestroy (Array models) ;
 
 #endif /* GTFPARSE_DEFINED */

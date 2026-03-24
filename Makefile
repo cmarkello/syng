@@ -53,8 +53,8 @@ syncmerset.o: syncmerset.c syncmerset.h $(UTILS_HEADERS) ONElib.h
 ONElib.o: ONElib.c ONElib.h 
 	$(CC) $(CFLAGS) -c $^
 
-gtfparse.o: gtfparse.c gtfparse.h $(UTILS_HEADERS)
-	$(CC) $(CFLAGS) -c gtfparse.c
+gtfparse.o: gtfparse.c gtfparse.h $(UTILS_HEADERS) syng.h
+	$(CC) $(CFLAGS) -c $^
 
 ### programs
 
@@ -79,17 +79,11 @@ syngbwt3: syngbwt3.c rskip.o syng.h seqio.o seqhash.o kmerhash.o ONElib.o $(UTIL
 k31type: k31type.c seqio.o ONElib.o $(UTILS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(SEQIO_LIBS)
 
-
 ONEview: ONEview.c ONElib.o
 	$(CC) $(CFLAGS) -o $@ $^ -lz
 
-syngpanrna: syngpanrna.c gtfparse.o syngbwt3.o rskip.o syncmerset.o \
-            seqio.o seqhash.o kmerhash.o ONElib.o $(UTILS_OBJS) syng_patched.h
-	$(CC) $(CFLAGS) $(SEQIO_OPTS) \
-	      -include syng_patched.h \
-	      -o $@ syngpanrna.c gtfparse.o syngbwt3.o rskip.o syncmerset.o \
-	              seqio.o seqhash.o kmerhash.o ONElib.o $(UTILS_OBJS) \
-	      -lpthread $(SEQIO_LIBS)
+syngpanrna: syngpanrna.c gtfparse.o syngbwt3.o rskip.o syncmerset.o seqio.o seqhash.o kmerhash.o ONElib.o $(UTILS_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ -lpthread $(SEQIO_LIBS)
 
 ### test
 

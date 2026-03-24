@@ -96,8 +96,8 @@ static char *gff3Attr (const char *attrs, const char *key)
    Maps txId string → index into models array. */
 
 typedef struct {
-  Dict  *txDict ;   /* txId → index in models */
-  Array *models ;   /* Array of TranscriptModel* */
+  DICT  *txDict ;   /* txId → index in models */
+  Array models ;   /* Array of TranscriptModel* */
 } TxTable ;
 
 static TxTable *txTableCreate (void)
@@ -112,12 +112,12 @@ static TxTable *txTableCreate (void)
    set only when the model is first created; subsequent calls are no-ops for
    those fields (all exons of a transcript should agree). */
 static TranscriptModel *txTableGet (TxTable      *tt,
-                                    const char   *txId,
+                                    char   *txId,
                                     const char   *geneId,
                                     const char   *chrom,
                                     char          strand)
 {
-  I64 idx ;
+  U64 idx ;
   if (!dictFind (tt->txDict, txId, &idx))
     {
       /* new transcript */
@@ -138,7 +138,7 @@ static TranscriptModel *txTableGet (TxTable      *tt,
 
 /* ── Main parser ──────────────────────────────────────────────────────── */
 
-Array *gtfParse (const char *fname,
+Array gtfParse (const char *fname,
                  const char *featureType,
                  const char *transcriptTag)
 {
@@ -248,7 +248,7 @@ Array *gtfParse (const char *fname,
   fprintf (stdout, "gtfParse: %s  %lld transcripts  %lld exon records\n",
            fname, arrayMax(tt->models), nExon) ;
 
-  Array *result = tt->models ;
+  Array result = tt->models ;
   dictDestroy (tt->txDict) ;
   free (tt) ;
   return result ;
@@ -256,12 +256,12 @@ Array *gtfParse (const char *fname,
 
 /* ── BED intron database ──────────────────────────────────────────────── */
 
-Array *intronBedParse (const char *fname)
+Array intronBedParse (const char *fname)
 {
   FILE *f = fopen (fname, "r") ;
   if (!f) { fprintf (stderr, "intronBedParse: cannot open %s\n", fname) ; return NULL ; }
 
-  Array *models = arrayCreate (1024, TranscriptModel*) ;
+  Array models = arrayCreate (1024, TranscriptModel*) ;
   char  *line   = NULL ;
   size_t cap    = 0 ;
   I64    lineNo = 0 ;
@@ -341,7 +341,7 @@ void transcriptModelDestroy (TranscriptModel *tm)
   free (tm) ;
 }
 
-void transcriptModelArrayDestroy (Array *models)
+void transcriptModelArrayDestroy (Array models)
 {
   if (!models) return ;
   for (I64 i = 0 ; i < arrayMax(models) ; ++i)
