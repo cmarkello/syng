@@ -1,10 +1,14 @@
 /* File: gtfparse.c
- * Author: Charles Markello
+ * Author: (syngpanrna extension)
  *-------------------------------------------------------------------
  * Description: GTF/GFF3 transcript annotation parser.
  *   Supports both GTF (tab-separated, attribute format key "value";)
  *   and GFF3 (tab-separated, attribute format key=value;).
  *   Only exon (or user-specified feature) lines are processed.
+ *
+ * NOTE: Array is a pointer typedef in syng's array.h
+ *   (typedef struct ArrayStruct *Array).  All Array variables are
+ *   therefore declared as plain Array, not Array*.
  *-------------------------------------------------------------------
  */
 
@@ -13,7 +17,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "gtfparse.h"
-#include "dict.h"   /* for string interning of txId / geneId */
+#include "dict.h"
 
 /* ── internal helpers ─────────────────────────────────────────────────── */
 
@@ -26,7 +30,7 @@ static int exonCmp (const void *a, const void *b)
   return 0 ;
 }
 
-static int txModelCmp (const void *a, const void *b)
+static int txModelPtrCmp (const void *a, const void *b)
 {
   const TranscriptModel *ta = *(const TranscriptModel **)a ;
   const TranscriptModel *tb = *(const TranscriptModel **)b ;
@@ -59,14 +63,13 @@ static char *gtfAttr (const char *attrs, const char *key)
   const char *p = attrs ;
   while (*p)
     {
-      while (*p == ' ' || *p == '\t') ++p ;  /* skip leading space */
+      while (*p == ' ' || *p == '\t') ++p ;
       if (strncmp (p, key, klen) == 0 && (p[klen] == ' ' || p[klen] == '\t'))
         {
           p += klen ;
           while (*p == ' ' || *p == '\t') ++p ;
           return stripQuotes (p) ;
         }
-      /* skip to next attribute (past next ';') */
       while (*p && *p != ';') ++p ;
       if (*p == ';') ++p ;
     }
@@ -93,11 +96,11 @@ static char *gff3Attr (const char *attrs, const char *key)
 }
 
 /* ── Dict-backed transcript model table ──────────────────────────────────
-   Maps txId string → index into models array. */
+   Maps txId string -> index in models array. */
 
 typedef struct {
-  DICT  *txDict ;   /* txId → index in models */
-  Array models ;   /* Array of TranscriptModel* */
+  DICT  *txDict ;   /* txId -> index in models (Dict is already a pointer typedef) */
+  Array models ;   /* Array of TranscriptModel*                                   */
 } TxTable ;
 
 static TxTable *txTableCreate (void)
@@ -108,9 +111,6 @@ static TxTable *txTableCreate (void)
   return tt ;
 }
 
-/* Get or create a TranscriptModel for this txId.  geneId/chrom/strand are
-   set only when the model is first created; subsequent calls are no-ops for
-   those fields (all exons of a transcript should agree). */
 static TranscriptModel *txTableGet (TxTable      *tt,
                                     char   *txId,
                                     const char   *geneId,
@@ -120,7 +120,6 @@ static TranscriptModel *txTableGet (TxTable      *tt,
   U64 idx ;
   if (!dictFind (tt->txDict, txId, &idx))
     {
-      /* new transcript */
       TranscriptModel *tm = (TranscriptModel *)calloc (1, sizeof(TranscriptModel)) ;
       tm->txId    = strdup (txId) ;
       tm->geneId  = geneId ? strdup (geneId) : strdup ("") ;
@@ -139,18 +138,20 @@ static TranscriptModel *txTableGet (TxTable      *tt,
 /* ── Main parser ──────────────────────────────────────────────────────── */
 
 Array gtfParse (const char *fname,
-                 const char *featureType,
-                 const char *transcriptTag)
+                const char *featureType,
+                const char *transcriptTag)
 {
   if (!featureType)    featureType   = "exon" ;
   if (!transcriptTag)  transcriptTag = "transcript_id" ;
 
   FILE *f = fopen (fname, "r") ;
-  if (!f) { fprintf (stderr, "gtfParse: cannot open %s\n", fname) ; return NULL ; }
+  if (!f)
+    {
+      fprintf (stderr, "gtfParse: cannot open %s\n", fname) ;
+      return NULL ;
+    }
 
-  /* Detect format: GFF3 uses key=value attributes, GTF uses key "value" */
   bool isGFF3 = (strstr (fname, ".gff") || strstr (fname, ".gff3")) ? true : false ;
-  /* Also detect by peeking at the first ##gff-version pragma */
 
   TxTable *tt  = txTableCreate () ;
   char    *line = NULL ;
@@ -163,12 +164,10 @@ Array gtfParse (const char *fname,
       ++lineNo ;
       if (line[0] == '#')
         {
-          /* GFF3 version pragma overrides extension-based detection */
           if (strncmp (line, "##gff-version", 13) == 0) isGFF3 = true ;
           continue ;
         }
 
-      /* Split into 9 tab-separated fields */
       char *fields[9] ;
       int   nf = 0 ;
       char *p  = line ;
@@ -180,19 +179,16 @@ Array gtfParse (const char *fname,
           *tab = '\0' ;
           p = tab + 1 ;
         }
-      if (nf < 9) continue ; /* skip malformed lines */
+      if (nf < 9) continue ;
 
-      /* col 3 (0-indexed col 2): feature type */
       if (strcmp (fields[2], featureType) != 0) continue ;
 
       char *chrom  = fields[0] ;
-      /* col 4,5: start and end (1-based, inclusive in GTF/GFF3) */
-      I64   start  = atoll (fields[3]) - 1 ;  /* convert to 0-based */
-      I64   end    = atoll (fields[4]) ;       /* half-open end */
+      I64   start  = atoll (fields[3]) - 1 ;
+      I64   end    = atoll (fields[4]) ;
       char  strand = fields[6][0] ;
       if (strand != '+' && strand != '-') strand = '+' ;
       char *attrs  = fields[8] ;
-      /* strip trailing newline from attrs */
       size_t alen = strlen (attrs) ;
       while (alen > 0 && (attrs[alen-1] == '\n' || attrs[alen-1] == '\r')) attrs[--alen] = '\0' ;
 
@@ -205,7 +201,6 @@ Array gtfParse (const char *fname,
           continue ;
         }
 
-      /* Try both gene_id (GTF) and gene_id / Parent (GFF3) */
       char *geneId = isGFF3 ? gff3Attr (attrs, "gene_id")
                             : gtfAttr  (attrs, "gene_id") ;
       if (!geneId && isGFF3)
@@ -225,12 +220,13 @@ Array gtfParse (const char *fname,
   free (line) ;
   fclose (f) ;
 
-  /* Sort exons within each transcript and compute final splicedLen */
+  /* Sort exons within each transcript */
   for (I64 i = 0 ; i < arrayMax(tt->models) ; ++i)
     {
       TranscriptModel *tm = arr(tt->models, i, TranscriptModel*) ;
+      /* arraySort operates on the Array directly (it's already a pointer) */
       arraySort (tm->exons, exonCmp) ;
-      /* Recompute splicedLen from sorted exons (deduplication safety) */
+      /* Recompute splicedLen from sorted exons */
       tm->splicedLen = 0 ;
       for (int j = 0 ; j < arrayMax(tm->exons) ; ++j)
         {
@@ -239,11 +235,11 @@ Array gtfParse (const char *fname,
         }
     }
 
-  /* Sort transcript models by (chrom, txId) */
+  /* Sort transcript models by (chrom, txId) using standard qsort */
   qsort (arrp(tt->models, 0, TranscriptModel*),
          arrayMax(tt->models),
          sizeof(TranscriptModel*),
-         txModelCmp) ;
+         txModelPtrCmp) ;
 
   fprintf (stdout, "gtfParse: %s  %lld transcripts  %lld exon records\n",
            fname, arrayMax(tt->models), nExon) ;
@@ -259,11 +255,15 @@ Array gtfParse (const char *fname,
 Array intronBedParse (const char *fname)
 {
   FILE *f = fopen (fname, "r") ;
-  if (!f) { fprintf (stderr, "intronBedParse: cannot open %s\n", fname) ; return NULL ; }
+  if (!f)
+    {
+      fprintf (stderr, "intronBedParse: cannot open %s\n", fname) ;
+      return NULL ;
+    }
 
   Array models = arrayCreate (1024, TranscriptModel*) ;
-  char  *line   = NULL ;
-  size_t cap    = 0 ;
+  char  *line  = NULL ;
+  size_t cap   = 0 ;
   I64    lineNo = 0 ;
 
   while (getline (&line, &cap, f) > 0)
@@ -285,17 +285,12 @@ Array intronBedParse (const char *fname)
       if (nf < 3) continue ;
 
       char *chrom  = fields[0] ;
-      I64   iStart = atoll (fields[1]) ; /* intron start (0-based) */
-      I64   iEnd   = atoll (fields[2]) ; /* intron end   (0-based, half-open) */
+      I64   iStart = atoll (fields[1]) ;
+      I64   iEnd   = atoll (fields[2]) ;
       char  strand = (nf >= 6 && fields[5]) ? fields[5][0] : '+' ;
       if (strand != '+' && strand != '-') strand = '+' ;
 
-      /* Build a synthetic transcript with two 1-base pseudo-exons flanking
-         the intron boundary.  This gives the syncmer iterator enough sequence
-         context (w+k bases on each side) to generate junction syncmers.
-         We extend by FLANK bases to ensure at least one syncmer is generated
-         spanning the junction. */
-      const I64 FLANK = 128 ; /* must be > w+k = 63 by default */
+      const I64 FLANK = 128 ;
 
       TranscriptModel *tm = (TranscriptModel *)calloc (1, sizeof(TranscriptModel)) ;
       char txIdBuf[256] ;
@@ -307,12 +302,10 @@ Array intronBedParse (const char *fname)
       tm->strand = strand ;
       tm->exons  = arrayCreate (2, Exon) ;
 
-      /* donor exon: the region just before the intron */
       Exon *e1   = arrayp (tm->exons, 0, Exon) ;
       e1->start  = (iStart >= FLANK) ? iStart - FLANK : 0 ;
       e1->end    = iStart ;
 
-      /* acceptor exon: the region just after the intron */
       Exon *e2   = arrayp (tm->exons, 1, Exon) ;
       e2->start  = iEnd ;
       e2->end    = iEnd + FLANK ;
@@ -348,3 +341,4 @@ void transcriptModelArrayDestroy (Array models)
     transcriptModelDestroy (arr(models, i, TranscriptModel*)) ;
   arrayDestroy (models) ;
 }
+

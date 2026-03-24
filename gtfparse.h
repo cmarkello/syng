@@ -1,5 +1,5 @@
 /* File: gtfparse.h
- * Author: Charles Markello
+ * Author: (syngpanrna extension)
  *-------------------------------------------------------------------
  * Description: GTF/GFF3 transcript annotation parser for syngpanrna.
  *   Parses exon records into per-transcript exon lists, sorted and
@@ -39,21 +39,24 @@ typedef struct {
  * Exons within each transcript are sorted by start coordinate.
  * Transcripts are sorted by (chrom, txId).
  * Returns NULL and prints an error on failure.
+ *
+ * NOTE: Array is already a pointer typedef in syng's array.h
+ *   (typedef struct ArrayStruct *Array), so we return Array not Array*.
  */
 Array gtfParse (const char *fname,
-                 const char *featureType,    /* NULL → "exon"          */
-                 const char *transcriptTag   /* NULL → "transcript_id" */
-                 ) ;
+                const char *featureType,    /* NULL -> "exon"          */
+                const char *transcriptTag   /* NULL -> "transcript_id" */
+                ) ;
 
 /* ── Parse a BED intron database (alternative/supplementary input) ─────── *
  *
- * Each BED interval [start, end] is the intron.  A synthetic two-exon
- * TranscriptModel is created representing only the donor and acceptor
- * splice sites (one base each side of the intron boundary), giving the
- * syncmer iterator enough context to generate junction-spanning syncmers.
+ * Each BED interval [start, end] is treated as an intron.  A synthetic
+ * two-exon TranscriptModel is created representing the flanking exonic
+ * regions on each side (FLANK=128 bp), giving the syncmer iterator enough
+ * context to generate junction-spanning syncmers.
  *
  * Strand is read from column 6 if present, otherwise defaults to '+'.
- * Returns an Array* of TranscriptModel* or NULL on failure.
+ * Returns an Array of TranscriptModel* or NULL on failure.
  */
 Array intronBedParse (const char *fname) ;
 
@@ -64,3 +67,4 @@ void transcriptModelDestroy (TranscriptModel *tm) ;
 void transcriptModelArrayDestroy (Array models) ;
 
 #endif /* GTFPARSE_DEFINED */
+
