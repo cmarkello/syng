@@ -671,11 +671,11 @@ int main (int argc, char *argv[])
   oneAddProvenance (ofTxPath, "syngpanrna", SYNGPANRNA_VERSION, getCommandLine()) ;
   syncmerParamsWrite (ofPath, params) ; syncmerParamsWrite (ofTxPath, params) ;
 
-  for (I64 i = 1 ; i <= dictMax(txDict) ; ++i)
+  for (I64 i = 0 ; i < dictMax(txDict) ; ++i)
     { char *s = dictName (txDict, i) ;
       oneWriteLine (ofPath, 'N', strlen(s), s) ;
       oneWriteLine (ofTxPath, 'N', strlen(s), s) ; }
-  for (I64 i = 1 ; i <= dictMax(geneDict) ; ++i)
+  for (I64 i = 0 ; i < dictMax(geneDict) ; ++i)
     { char *s = dictName (geneDict, i) ;
       oneWriteLine (ofPath, 'G', strlen(s), s) ;
       oneWriteLine (ofTxPath, 'G', strlen(s), s) ; }
