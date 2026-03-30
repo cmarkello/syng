@@ -3,7 +3,7 @@
 CFLAGS = -O3
 #CFLAGS = -g	# for debugging
 
-ALL = syng syngpath2gbwt ONEview syngmap syngstat k31type syngannotate
+ALL = syng syngpath2gbwt ONEview syngmap syngstat k31type syngannotate syngview
 
 DESTDIR = ~/bin
 
@@ -80,6 +80,9 @@ k31type: k31type.c seqio.o ONElib.o $(UTILS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(SEQIO_LIBS)
 
 syngannotate: syngannotate.c gffio.o syngbwt3.o rskip.o syncmerset.o seqio.o seqhash.o kmerhash.o ONElib.o $(UTILS_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ -lpthread $(SEQIO_LIBS)
+
+syngview: syngview.c syngbwt3.o rskip.o syncmerset.o seqio.o seqhash.o kmerhash.o ONElib.o $(UTILS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ -lpthread $(SEQIO_LIBS)
 
 ONEview: ONEview.c ONElib.o
