@@ -13,10 +13,11 @@
 #include "utils.h"
 #include "array.h"
 #include "hash.h"
+#include "dict.h"
 #include "ONElib.h"
 #include "syncmerset.h"
 
-#define SYNG_VERSION  "2.0"
+#define SYNG_VERSION  "2.1"
 
 typedef struct {
   U32 file ;
@@ -58,6 +59,52 @@ bool           syngBWTmatchNext (SyngBWTpath *sbp, I32 nextNode, U32 nextOff, U3
 void           syngBWTpathDestroy (SyngBWTpath *sbp) ;
 void           syngBWTstat (SyngBWT *sb) ;
 bool           syngBWTlocFind (SyngBWT *sb, I64 loc, I64 *file, I64 *path, I64 *offset) ;
+
+// Annotation-aware spliced pangenome graph structures
+// Inspired by vg rna (https://github.com/vgteam/vg/wiki/Transcriptomic-analyses)
+
+// A splice edge connects an exon donor site to an exon acceptor site in the syncmer graph.
+// These are additional edges layered on top of the genomic pangenome graph.
+typedef struct {
+  I32 donorNode ;      // syncmer node at the donor (end of upstream exon)
+  I32 acceptorNode ;   // syncmer node at the acceptor (start of downstream exon)
+  U32 donorOffset ;    // offset within the donor syncmer node
+  U32 acceptorOffset ; // offset within the acceptor syncmer node
+  I32 transcriptIdx ;  // index into transcript list
+  I32 iSample ;        // which sample/haplotype this junction belongs to
+} SyncSpliceEdge ;
+
+// A transcript path through the syncmer graph, representing a single transcript
+// across exons connected by splice junctions. Analogous to GBWT paths in vg.
+typedef struct {
+  char *transcriptId ;
+  char *geneId ;
+  I32   iSample ;       // sample/haplotype index
+  I32   nNodes ;         // number of syncmer nodes in this transcript path
+  I32  *nodes ;          // array of syncmer node IDs (negative if reverse strand)
+  U32  *offsets ;        // array of offsets between consecutive nodes
+  I32   nExons ;         // number of exons
+  I32  *exonBoundaries ; // indices into nodes[] where each exon starts
+} SyncTranscriptPath ;
+
+// The spliced pangenome graph extends SyngBWT with transcript annotation.
+// It layers splice junction edges and transcript paths onto the base syncmer graph.
+typedef struct {
+  SyngBWT    *baseBWT ;       // the underlying genomic syncmer graph
+  SyncmerSet *sms ;           // the syncmer set used for node lookups
+  Array       spliceEdges ;   // of SyncSpliceEdge
+  Array       txPaths ;       // of SyncTranscriptPath
+  DICT       *txDict ;        // transcript_id -> index into txPaths
+  DICT       *geneDict ;      // gene_id -> index (for lookup)
+  int         nSamples ;      // number of samples with annotations
+  char      **sampleNames ;   // sample names parallel to annotation files
+} SplicedSyngBWT ;
+
+SplicedSyngBWT *splicedSyngBWTcreate (SyngBWT *baseBWT, SyncmerSet *sms) ;
+void            splicedSyngBWTdestroy (SplicedSyngBWT *ssbwt) ;
+void            splicedSyngBWTaddTranscriptPath (SplicedSyngBWT *ssbwt,
+                    SyncTranscriptPath *txPath) ;
+void            splicedSyngBWTwrite (OneFile *of, SplicedSyngBWT *ssbwt) ;
 
 static char *syngSchemaText =
   "1 3 def 1 0               schema for syng\n"
@@ -104,6 +151,21 @@ static char *syngSchemaText =
   "D M 3 3 INT 3 INT 3 INT   mem: start, end (0-based), count\n"
   "D X 2 3 INT 3 DNA         missing syncmer not found in graph: start coordinate, sequence\n"
   "D U 3 3 INT 3 INT 3 INT   unique mapping: file, path, offset (negative offset = reverse)"
+  ".\n"
+  "P 6 sgtxom                SPLICED PANGENOME TRANSCRIPTOME\n"
+  "S 4 stxn                  spliced transcriptome: annotations over a gbwt\n"
+  "D h 3 3 INT 3 INT 3 INT   k, w, seed for the seqhash\n"
+  ".\n"
+  "O T 1 3 INT               transcript: sample index\n"
+  "D i 1 6 STRING            transcript_id\n"
+  "D g 1 6 STRING            gene_id for this transcript\n"
+  "D n 1 8 INT_LIST          node list for transcript path through syncmer graph\n"
+  "D f 1 8 INT_LIST          offset list for transcript path (1:1 with n)\n"
+  "D x 1 8 INT_LIST          exon boundary indices into node list\n"
+  ".\n"
+  "O J 4 3 INT 3 INT 3 INT 3 INT   splice junction: donor_node, acceptor_node, donor_off, acceptor_off\n"
+  "D a 1 3 INT               sample index for this splice junction\n"
   ;
+
 
 /****************** end of file ********************/
