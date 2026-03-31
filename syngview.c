@@ -21,8 +21,9 @@
  *   alongside the underlying genomic variation.
  *
  * Usage:
- *   syngview -readK <.1khash> -readTx <.1sgtxom> [-readGBWT <.1gbwt>]
- *            [-region <node_from>:<node_to>] [-o <prefix>]
+ *   syngview -readK <.1khash> -readTx <.1sgtxom> [-readPaths <.1path>]
+ *            [-reference <sample_id> <ref.fa>] [-region chr:start-end]
+ *            [-gfa] [-bed] [-o <prefix>]
  *
  * HISTORY:
  * Created: Mar 30 2026
@@ -102,19 +103,116 @@ static void bedWriteTranscript (FILE *f, char *chrom, I64 txStart, I64 txEnd,
   fprintf(f, "\n") ;
 }
 
+/************ mapping genomic coordinates to syncmer nodes ************/
+
+// SyncmerCoord: maps a genomic position to a syncmer node
+typedef struct {
+  I64 genomePos ;    // position in the reference genome sequence
+  I32 syncNode ;     // syncmer node ID (negative if reverse complement)
+} SyncmerCoord ;
+
+// Build a coordinate map for a reference sequence: scan it for syncmers
+// and record each syncmer's genomic position and node ID.
+static Array buildSyncmerCoordMap (char *seq, I64 seqLen, Seqhash *sh, KmerHash *kh)
+{
+  Array coordMap = arrayCreate(seqLen / 50, SyncmerCoord) ;
+  U64 *uBuf = new(kh->plen, U64) ;
+
+  // convert sequence to index form
+  char *seqIdx = new(seqLen, char) ;
+  I64 i ;
+  for (i = 0 ; i < seqLen ; ++i)
+    seqIdx[i] = dna2index4Conv[(unsigned char)seq[i]] ;
+
+  SeqhashIterator *sit = syncmerIterator(sh, seqIdx, seqLen) ;
+  int pos ;
+  while (syncmerNext(sit, 0, &pos, 0))
+    { I64 sync = 0 ;
+      kmerHashFindThreadSafe(kh, seqIdx + pos, &sync, uBuf) ;
+      if (sync && (sync > 2 || sync < -2)) // skip poly-X
+        { SyncmerCoord *sc = arrayp(coordMap, arrayMax(coordMap), SyncmerCoord) ;
+          sc->genomePos = pos ;
+          sc->syncNode = sync ;
+        }
+    }
+  seqhashIteratorDestroy(sit) ;
+  newFree(uBuf, kh->plen, U64) ;
+  newFree(seqIdx, seqLen, char) ;
+
+  return coordMap ;
+}
+
 /**************** region filtering ******************/
 
 typedef struct {
-  I64 nodeFrom ;
-  I64 nodeTo ;
-  bool isActive ;
+  char  chrName[256] ;  // chromosome name from -region
+  I64   startPos ;      // start coordinate (0-based)
+  I64   endPos ;        // end coordinate
+  bool  isActive ;
+  Hash  nodeHash ;      // hash of node IDs in the region (built from coord map)
 } Region ;
 
 static bool nodeInRegion (I64 node, Region *region)
 {
   if (!region->isActive) return true ;
   I64 absNode = (node >= 0) ? node : -node ;
-  return (absNode >= region->nodeFrom && absNode <= region->nodeTo) ;
+  return hashFind(region->nodeHash, hashInt(absNode), 0) ;
+}
+
+// Populate region->nodeHash with all syncmer nodes whose genomic position
+// falls within [region->startPos, region->endPos] on the matching chromosome.
+static void regionBuildNodeHash (Region *region, Array coordMap, int syncmerLen)
+{
+  region->nodeHash = hashCreate(4096) ;
+  I64 i ;
+  for (i = 0 ; i < arrayMax(coordMap) ; ++i)
+    { SyncmerCoord *sc = arrp(coordMap, i, SyncmerCoord) ;
+      // a syncmer at genomePos covers [genomePos, genomePos + syncmerLen)
+      if (sc->genomePos + syncmerLen > region->startPos && sc->genomePos < region->endPos)
+        { I64 absNode = (sc->syncNode >= 0) ? sc->syncNode : -sc->syncNode ;
+          hashAdd(region->nodeHash, hashInt(absNode), 0) ;
+        }
+    }
+}
+
+// Node-to-position map: hash maps node ID -> index into posArray
+typedef struct {
+  Hash  hash ;       // node ID -> index
+  Array posArray ;   // parallel array of I64 genomic positions
+} NodePosMap ;
+
+static NodePosMap *buildNodePosMap (Array coordMap)
+{
+  NodePosMap *npm = new0(1, NodePosMap) ;
+  npm->hash = hashCreate(4096) ;
+  npm->posArray = arrayCreate(4096, I64) ;
+  I64 i ;
+  for (i = 0 ; i < arrayMax(coordMap) ; ++i)
+    { SyncmerCoord *sc = arrp(coordMap, i, SyncmerCoord) ;
+      I64 absNode = (sc->syncNode >= 0) ? sc->syncNode : -sc->syncNode ;
+      int idx ;
+      if (hashAdd(npm->hash, hashInt(absNode), &idx))
+        array(npm->posArray, idx, I64) = sc->genomePos ;  // store first occurrence
+    }
+  return npm ;
+}
+
+static bool nodePosMapFind (NodePosMap *npm, I64 absNode, I64 *posOut)
+{
+  int idx ;
+  if (hashFind(npm->hash, hashInt(absNode), &idx))
+    { *posOut = arr(npm->posArray, idx, I64) ;
+      return true ;
+    }
+  return false ;
+}
+
+static void nodePosMapDestroy (NodePosMap *npm)
+{
+  if (!npm) return ;
+  hashDestroy(npm->hash) ;
+  arrayDestroy(npm->posArray) ;
+  newFree(npm, 1, NodePosMap) ;
 }
 
 /**************** main ******************/
@@ -129,10 +227,12 @@ static char usage[] =
   "\n"
   "Optional inputs:\n"
   "  -readPaths <.1path file> : genomic sample paths to include in GFA\n"
+  "  -reference <sample_id> <ref.fa> : reference sample for coordinate mapping\n"
   "\n"
   "Options:\n"
   "  -o <outfile prefix>      : [syngView] output prefix (.gfa, .bed)\n"
-  "  -region <from>:<to>      : only output nodes in this ID range\n"
+  "  -region <chr>:<start>-<end> : only output nodes in this genomic coordinate range\n"
+  "                             (requires -reference)\n"
   "  -gfa                     : [default] write GFA output\n"
   "  -bed                     : write BED output for transcript coordinates\n" ;
 
@@ -143,9 +243,12 @@ int main (int argc, char *argv[])
   SyncmerParams params = syncmerParamsDefault() ;
   char       *txFile = 0 ;
   char       *pathFile = 0 ;
+  char       *refSampleId = 0 ;
+  char       *refFasta = 0 ;
   bool        doGfa = true ;
   bool        doBed = false ;
-  Region      region = { 0, 0, false } ;
+  Region      region ;
+  memset(&region, 0, sizeof(Region)) ;
 
   timeUpdate(0) ;
   schema = oneSchemaCreateFromText(syngSchemaText) ;
@@ -167,11 +270,27 @@ int main (int argc, char *argv[])
       { pathFile = argv[1] ; argc -= 2 ; argv += 2 ; }
     else if (!strcmp(*argv, "-o") && argc > 1)
       { outPrefix = argv[1] ; argc -= 2 ; argv += 2 ; }
+    else if (!strcmp(*argv, "-reference") && argc > 2)
+      { refSampleId = argv[1] ; refFasta = argv[2] ;
+        argc -= 3 ; argv += 3 ;
+      }
     else if (!strcmp(*argv, "-region") && argc > 1)
-      { if (sscanf(argv[1], "%lld:%lld", &region.nodeFrom, &region.nodeTo) == 2)
-          region.isActive = true ;
-        else
-          die("-region requires format <from>:<to>, got %s", argv[1]) ;
+      { // parse chr:start-end format
+        char *arg = argv[1] ;
+        char *colon = strchr(arg, ':') ;
+        if (!colon) die("-region requires format <chr>:<start>-<end>, got %s", arg) ;
+        int chrLen = colon - arg ;
+        if (chrLen >= (int)sizeof(region.chrName))
+          die("-region chromosome name too long") ;
+        strncpy(region.chrName, arg, chrLen) ;
+        region.chrName[chrLen] = '\0' ;
+        char *rest = colon + 1 ;
+        char *dash = strchr(rest, '-') ;
+        if (!dash)
+          die("-region requires format <chr>:<start>-<end>, got %s", arg) ;
+        region.startPos = atoll(rest) ;
+        region.endPos = atoll(dash + 1) ;
+        region.isActive = true ;
         argc -= 2 ; argv += 2 ;
       }
     else if (!strcmp(*argv, "-gfa")) { doGfa = true ; --argc ; ++argv ; }
@@ -180,10 +299,71 @@ int main (int argc, char *argv[])
 
   if (!sms) die("must provide -readK <.1khash file>") ;
   if (!txFile) die("must provide -readTx <.1sgtxom file>") ;
+  if (region.isActive && !refFasta)
+    die("-region requires -reference <sample_id> <ref.fa>") ;
 
   params = sms->params ;
   int syncmerLen = params.k + params.w ;
   KmerHash *kh = sms->kh ;
+
+  // Build coordinate map from reference if provided
+  DICT *refSeqDict = 0 ;          // chr name -> index
+  Array refCoordMaps = 0 ;        // Array of (Array of SyncmerCoord), one per chr
+  NodePosMap *nodePosMap = 0 ;    // node ID -> genomic position (for BED output)
+
+  if (refFasta)
+    { Seqhash *sh = seqhashCreate(params.k, params.w+1, params.seed) ;
+      fprintf(stdout, "scanning reference %s for syncmer coordinates...\n", refFasta) ;
+      SeqIO *sio = seqIOopenRead(refFasta, dna2indexConv, 0) ;
+      if (!sio) die("failed to open reference FASTA %s", refFasta) ;
+
+      refSeqDict = dictCreate(64) ;
+      refCoordMaps = arrayCreate(64, Array) ;
+
+      while (seqIOread(sio))
+        { char *seqName = strdup(sqioId(sio)) ;
+          U64 seqIdx ;
+          dictAdd(refSeqDict, seqName, &seqIdx) ;
+
+          char *seqIdx4 = new(sio->seqLen, char) ;
+          I64 j ;
+          for (j = 0 ; j < sio->seqLen ; ++j)
+            seqIdx4[j] = sqioSeq(sio)[j] ;
+
+          Array cmap = buildSyncmerCoordMap(seqIdx4, sio->seqLen, sh, kh) ;
+          array(refCoordMaps, seqIdx, Array) = cmap ;
+          newFree(seqIdx4, sio->seqLen, char) ;
+          free(seqName) ;
+        }
+      seqIOclose(sio) ;
+      seqhashDestroy(sh) ;
+      fprintf(stdout, "built coordinate maps for %lld reference sequences\n",
+              (long long)dictMax(refSeqDict)) ;
+
+      // if region filter is active, build the node hash
+      if (region.isActive)
+        { U64 chrIdx ;
+          if (!dictFind(refSeqDict, region.chrName, &chrIdx))
+            die("chromosome %s not found in reference %s", region.chrName, refFasta) ;
+          Array cmap = arr(refCoordMaps, chrIdx, Array) ;
+          regionBuildNodeHash(&region, cmap, syncmerLen) ;
+          fprintf(stdout, "region %s:%lld-%lld contains %d nodes\n",
+                  region.chrName, region.startPos, region.endPos,
+                  hashCount(region.nodeHash)) ;
+        }
+
+      // build node-to-position map (for BED and walk coordinate output)
+      // Use the region chromosome if active, otherwise first chr
+      if (region.isActive)
+        { U64 chrIdx ;
+          dictFind(refSeqDict, region.chrName, &chrIdx) ;
+          nodePosMap = buildNodePosMap(arr(refCoordMaps, chrIdx, Array)) ;
+        }
+      else if (arrayMax(refCoordMaps) > 0)
+        nodePosMap = buildNodePosMap(arr(refCoordMaps, 0, Array)) ;
+
+      timeUpdate(stdout) ;
+    }
 
   // =========== GFA output ===========
   if (doGfa)
@@ -312,21 +492,33 @@ int main (int argc, char *argv[])
                 for (i = 0 ; i < curNNodes ; ++i)
                   if (nodeInRegion(curNodes[i], &region)) { inRegion = true ; break ; }
                 if (inRegion)
-                  { // compute bp length
-                    I64 bpLen = 0 ;
-                    for (i = 0 ; i < curNNodes ; ++i) bpLen += curOffsets[i] ;
-                    bpLen += syncmerLen ;
-                    // create walk label: sample_txId
-                    char walkName[512] ;
-                    snprintf(walkName, sizeof(walkName), "tx_%s",
-                             curTxId ? curTxId : "unknown") ;
+                  { // compute walk coordinates
+                    I64 walkStart = 0, walkEnd = 0 ;
+                    char *walkChr = curGeneId ? curGeneId : "unknown" ;
+                    if (nodePosMap)
+                      { // use real genomic coordinates from first and last node
+                        I64 firstAbs = (curNodes[0] >= 0) ? curNodes[0] : -curNodes[0] ;
+                        I64 lastAbs = (curNodes[curNNodes-1] >= 0) ?
+                                       curNodes[curNNodes-1] : -curNodes[curNNodes-1] ;
+                        I64 pos ;
+                        if (nodePosMapFind(nodePosMap, firstAbs, &pos))
+                          walkStart = pos ;
+                        if (nodePosMapFind(nodePosMap, lastAbs, &pos))
+                          walkEnd = pos + syncmerLen ;
+                        if (region.isActive) walkChr = region.chrName ;
+                      }
+                    else
+                      { I64 bpLen = 0 ;
+                        for (i = 0 ; i < curNNodes ; ++i) bpLen += curOffsets[i] ;
+                        walkEnd = bpLen + syncmerLen ;
+                      }
                     I32 *nodes32 = new(curNNodes, I32) ;
                     for (i = 0 ; i < curNNodes ; ++i) nodes32[i] = curNodes[i] ;
                     char sampleBuf[64] ;
                     snprintf(sampleBuf, sizeof(sampleBuf), "sample%d", curSample) ;
                     gfaWriteWalk(gfaFile, sampleBuf, curSample,
-                                 curGeneId ? curGeneId : "unknown",
-                                 0, bpLen, curNNodes, nodes32) ;
+                                 walkChr, walkStart, walkEnd,
+                                 curNNodes, nodes32) ;
                     newFree(nodes32, curNNodes, I32) ;
                     ++nWalks ;
                   }
@@ -388,8 +580,21 @@ int main (int argc, char *argv[])
                       for (i = 0 ; i < len ; ++i) nodes32[i] = nodeList[i] ;
                       char sampleBuf[64] ;
                       snprintf(sampleBuf, sizeof(sampleBuf), "genome%d", pathSource) ;
+                      // use real coordinates if available
+                      I64 wStart = 0, wEnd = pathLen ;
+                      char *wChr = "chr" ;
+                      if (nodePosMap && len > 0)
+                        { I64 fAbs = (nodeList[0] >= 0) ? nodeList[0] : -nodeList[0] ;
+                          I64 lAbs = (nodeList[len-1] >= 0) ? nodeList[len-1] : -nodeList[len-1] ;
+                          I64 pos ;
+                          if (nodePosMapFind(nodePosMap, fAbs, &pos))
+                            wStart = pos ;
+                          if (nodePosMapFind(nodePosMap, lAbs, &pos))
+                            wEnd = pos + syncmerLen ;
+                          if (region.isActive) wChr = region.chrName ;
+                        }
                       gfaWriteWalk(gfaFile, sampleBuf, pathSource,
-                                   "chr", 0, pathLen, len, nodes32) ;
+                                   wChr, wStart, wEnd, len, nodes32) ;
                       newFree(nodes32, len, I32) ;
                       ++nWalks ;
                     }
@@ -455,47 +660,131 @@ int main (int argc, char *argv[])
             curExonBounds = oneIntList(ofTx) ;
             // now we have a complete transcript with exon info - write BED
             if (curNNodes > 0 && curTxId)
-              { // compute cumulative positions from offsets
-                I64 pos = 0 ;
-                I64 txStart = 0, txEnd = 0 ;
-                int i ;
-                for (i = 0 ; i < curNNodes ; ++i)
-                  { pos += curOffsets[i] ; }
-                txEnd = pos + syncmerLen ;
-                // write BED with exon blocks
-                if (curNExons > 0 && curExonBounds)
-                  { I64 *exStarts = new(curNExons, I64) ;
-                    I64 *exEnds = new(curNExons, I64) ;
-                    for (i = 0 ; i < curNExons ; ++i)
-                      { I64 exStartIdx = curExonBounds[i] ;
-                        I64 exEndIdx = (i+1 < curNExons) ? curExonBounds[i+1] - 1
-                                                          : curNNodes - 1 ;
-                        // compute positions
-                        I64 sPos = 0 ;
-                        int j ;
-                        for (j = 0 ; j <= exStartIdx && j < curNNodes ; ++j)
-                          sPos += curOffsets[j] ;
-                        exStarts[i] = sPos ;
-                        I64 ePos = 0 ;
-                        for (j = 0 ; j <= exEndIdx && j < curNNodes ; ++j)
-                          ePos += curOffsets[j] ;
-                        exEnds[i] = ePos + syncmerLen ;
-                      }
-                    char nameBuf[512] ;
-                    snprintf(nameBuf, sizeof(nameBuf), "%s|%s|s%d",
-                             curTxId, curGeneId ? curGeneId : ".", curSample) ;
-                    bedWriteTranscript(bedFile, curGeneId ? curGeneId : ".",
-                                       exStarts[0], exEnds[curNExons-1],
-                                       nameBuf, '+', curNExons,
-                                       exStarts, exEnds) ;
-                    newFree(exStarts, curNExons, I64) ;
-                    newFree(exEnds, curNExons, I64) ;
+              { // region filter: skip transcripts with no nodes in region
+                if (region.isActive)
+                  { bool inRegion = false ;
+                    int i ;
+                    for (i = 0 ; i < curNNodes ; ++i)
+                      if (nodeInRegion(curNodes[i], &region)) { inRegion = true ; break ; }
+                    if (!inRegion) { curNNodes = 0 ; curNExons = 0 ; break ; }
                   }
-                else // single-exon transcript
-                  fprintf(bedFile, "%s\t%lld\t%lld\t%s|%s|s%d\t0\t+\n",
-                          curGeneId ? curGeneId : ".",
-                          txStart, txEnd, curTxId,
-                          curGeneId ? curGeneId : ".", curSample) ;
+                // determine chromosome name
+                char *bedChr = curGeneId ? curGeneId : "." ;
+                if (region.isActive) bedChr = region.chrName ;
+                else if (refSampleId) bedChr = "ref" ;
+
+                if (nodePosMap)
+                  { // use real genomic coordinates from reference
+                    I64 firstPos = 0, lastPos = 0 ;
+                    bool hasFirst = false, hasLast = false ;
+                    I64 firstAbs = (curNodes[0] >= 0) ? curNodes[0] : -curNodes[0] ;
+                    I64 lastAbs = (curNodes[curNNodes-1] >= 0) ?
+                                   curNodes[curNNodes-1] : -curNodes[curNNodes-1] ;
+                    I64 pos ;
+                    if (nodePosMapFind(nodePosMap, firstAbs, &pos))
+                      { firstPos = pos ; hasFirst = true ; }
+                    if (nodePosMapFind(nodePosMap, lastAbs, &pos))
+                      { lastPos = pos ; hasLast = true ; }
+
+                    // detect strand: if first node maps after last, it's minus strand
+                    bool isReversed = hasFirst && hasLast && firstPos > lastPos ;
+                    char strand = isReversed ? '-' : '+' ;
+                    I64 txStart = isReversed ? lastPos : firstPos ;
+                    I64 txEnd = (isReversed ? firstPos : lastPos) + syncmerLen ;
+
+                    if (curNExons > 0 && curExonBounds)
+                      { I64 *exStarts = new(curNExons, I64) ;
+                        I64 *exEnds = new(curNExons, I64) ;
+                        int i ;
+                        for (i = 0 ; i < curNExons ; ++i)
+                          { // for reversed transcripts, iterate exons in reverse
+                            int ei = isReversed ? (curNExons - 1 - i) : i ;
+                            I64 exStartIdx = curExonBounds[ei] ;
+                            I64 exEndIdx = (ei+1 < curNExons) ? curExonBounds[ei+1] - 1
+                                                               : curNNodes - 1 ;
+                            // map exon boundary nodes to genomic positions
+                            I64 absS = (curNodes[exStartIdx] >= 0) ?
+                                        curNodes[exStartIdx] : -curNodes[exStartIdx] ;
+                            I64 absE = (curNodes[exEndIdx] >= 0) ?
+                                        curNodes[exEndIdx] : -curNodes[exEndIdx] ;
+                            I64 posS = txStart, posE = txEnd ;
+                            if (nodePosMapFind(nodePosMap, absS, &pos)) posS = pos ;
+                            if (nodePosMapFind(nodePosMap, absE, &pos)) posE = pos + syncmerLen ;
+                            // for reversed exons, the start/end may be swapped
+                            if (posS > posE)
+                              { I64 tmp = posS ; posS = posE ; posE = tmp ; }
+                            exStarts[i] = posS ;
+                            exEnds[i] = posE ;
+                          }
+                        // ensure monotonic ordering and valid block sizes
+                        for (i = 1 ; i < curNExons ; ++i)
+                          { if (exStarts[i] < exStarts[i-1])
+                              exStarts[i] = exStarts[i-1] ;
+                            if (exEnds[i] < exStarts[i])
+                              exEnds[i] = exStarts[i] + syncmerLen ;
+                          }
+                        // ensure txStart/txEnd encompass all exons
+                        if (exStarts[0] < txStart) txStart = exStarts[0] ;
+                        if (exEnds[curNExons-1] > txEnd) txEnd = exEnds[curNExons-1] ;
+
+                        char nameBuf[512] ;
+                        snprintf(nameBuf, sizeof(nameBuf), "%s|%s|s%d",
+                                 curTxId, curGeneId ? curGeneId : ".", curSample) ;
+                        bedWriteTranscript(bedFile, bedChr,
+                                           txStart, txEnd,
+                                           nameBuf, strand, curNExons,
+                                           exStarts, exEnds) ;
+                        newFree(exStarts, curNExons, I64) ;
+                        newFree(exEnds, curNExons, I64) ;
+                      }
+                    else
+                      { if (txStart > txEnd)
+                          { I64 tmp = txStart ; txStart = txEnd ; txEnd = tmp ; }
+                        fprintf(bedFile, "%s\t%lld\t%lld\t%s|%s|s%d\t0\t%c\n",
+                                bedChr, txStart, txEnd, curTxId,
+                                curGeneId ? curGeneId : ".", curSample, strand) ;
+                      }
+                  }
+                else
+                  { // no reference: use offset-based positions (original behavior)
+                    I64 pos = 0 ;
+                    I64 txStart = 0, txEnd = 0 ;
+                    int i ;
+                    for (i = 0 ; i < curNNodes ; ++i)
+                      { pos += curOffsets[i] ; }
+                    txEnd = pos + syncmerLen ;
+                    if (curNExons > 0 && curExonBounds)
+                      { I64 *exStarts = new(curNExons, I64) ;
+                        I64 *exEnds = new(curNExons, I64) ;
+                        for (i = 0 ; i < curNExons ; ++i)
+                          { I64 exStartIdx = curExonBounds[i] ;
+                            I64 exEndIdx = (i+1 < curNExons) ? curExonBounds[i+1] - 1
+                                                              : curNNodes - 1 ;
+                            I64 sPos = 0 ;
+                            int j ;
+                            for (j = 0 ; j <= exStartIdx && j < curNNodes ; ++j)
+                              sPos += curOffsets[j] ;
+                            exStarts[i] = sPos ;
+                            I64 ePos = 0 ;
+                            for (j = 0 ; j <= exEndIdx && j < curNNodes ; ++j)
+                              ePos += curOffsets[j] ;
+                            exEnds[i] = ePos + syncmerLen ;
+                          }
+                        char nameBuf[512] ;
+                        snprintf(nameBuf, sizeof(nameBuf), "%s|%s|s%d",
+                                 curTxId, curGeneId ? curGeneId : ".", curSample) ;
+                        bedWriteTranscript(bedFile, bedChr,
+                                           exStarts[0], exEnds[curNExons-1],
+                                           nameBuf, '+', curNExons,
+                                           exStarts, exEnds) ;
+                        newFree(exStarts, curNExons, I64) ;
+                        newFree(exEnds, curNExons, I64) ;
+                      }
+                    else
+                      fprintf(bedFile, "%s\t%lld\t%lld\t%s|%s|s%d\t0\t+\n",
+                              bedChr, txStart, txEnd, curTxId,
+                              curGeneId ? curGeneId : ".", curSample) ;
+                  }
                 ++nBed ;
               }
             curNNodes = 0 ;
@@ -511,6 +800,18 @@ int main (int argc, char *argv[])
       timeUpdate(stdout) ;
     }
 
+  // cleanup
+  if (region.isActive && region.nodeHash) hashDestroy(region.nodeHash) ;
+  if (nodePosMap) nodePosMapDestroy(nodePosMap) ;
+  if (refCoordMaps)
+    { int c ;
+      for (c = 0 ; c < arrayMax(refCoordMaps) ; ++c)
+        { Array cmap = arr(refCoordMaps, c, Array) ;
+          if (cmap) arrayDestroy(cmap) ;
+        }
+      arrayDestroy(refCoordMaps) ;
+    }
+  if (refSeqDict) dictDestroy(refSeqDict) ;
   if (sms) syncmerSetDestroy(sms) ;
   fprintf(stdout, "total: ") ; timeTotal(stdout) ;
   return 0 ;
