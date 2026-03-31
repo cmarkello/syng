@@ -805,6 +805,72 @@ void syngBWTstat (SyngBWT *sb)
   arrayDestroy (eHist) ; arrayDestroy (cHist) ;
 }
 
+/************** accessors for syngview ****************/
+
+I64 syngBWTnodeMax (SyngBWT *sb) { return arrayMax(sb->node) ; }
+
+bool syngBWTnodeExists (SyngBWT *sb, I64 i)
+{ return (i > 0 && i < arrayMax(sb->status) && (arr(sb->status, i, U8) & NODE_EXISTS)) ; }
+
+int syngBWTnodeOutDegree (SyngBWT *sb, I64 i)
+{ if (!syngBWTnodeExists (sb, i)) return 0 ;
+  U8 s = arr(sb->status, i, U8) ;
+  if (s & NODE_SIMPLE_OUT) return 1 ;
+  return rsNsym (arr(sb->node, i, Node).out.rs) ;
+}
+
+int syngBWTnodeInDegree (SyngBWT *sb, I64 i)
+{ if (!syngBWTnodeExists (sb, i)) return 0 ;
+  U8 s = arr(sb->status, i, U8) ;
+  if (s & NODE_SIMPLE_IN) return 1 ;
+  return rsNsym (arr(sb->node, i, Node).in.rs) ;
+}
+
+bool syngBWTnodeOutEdge (SyngBWT *sb, I64 i, int j, I32 *adj, U32 *offset, I64 *count)
+{ if (!syngBWTnodeExists (sb, i)) return false ;
+  U8 s = arr(sb->status, i, U8) ;
+  Node n = arr(sb->node, i, Node) ;
+  if (s & NODE_SIMPLE_OUT)
+    { if (j != 0) return false ;
+      if (adj) *adj = n.out.sync ;
+      if (offset) *offset = n.out.offset ;
+      if (count) *count = n.out.count ;
+      return true ;
+    }
+  I64 sym, off, cnt ;
+  if (!rsDirSyng (n.out.rs, j, &sym, &off, &cnt)) return false ;
+  if (adj) *adj = (I32)sym ;
+  if (offset) *offset = (U32)off ;
+  if (count) *count = cnt ;
+  return true ;
+}
+
+bool syngBWTnodeInEdge (SyngBWT *sb, I64 i, int j, I32 *adj, U32 *offset, I64 *count)
+{ if (!syngBWTnodeExists (sb, i)) return false ;
+  U8 s = arr(sb->status, i, U8) ;
+  Node n = arr(sb->node, i, Node) ;
+  if (s & NODE_SIMPLE_IN)
+    { if (j != 0) return false ;
+      if (adj) *adj = n.in.sync ;
+      if (offset) *offset = n.in.offset ;
+      if (count) *count = n.in.count ;
+      return true ;
+    }
+  I64 sym, off, cnt ;
+  if (!rsDirSyng (n.in.rs, j, &sym, &off, &cnt)) return false ;
+  if (adj) *adj = (I32)sym ;
+  if (offset) *offset = (U32)off ;
+  if (count) *count = cnt ;
+  return true ;
+}
+
+I64 syngBWTpathCount (SyngBWT *sb) { return sb->path ? arrayMax(sb->path) : 0 ; }
+
+SyngPath *syngBWTpathInfo (SyngBWT *sb, I64 i)
+{ if (!sb->path || i < 0 || i >= arrayMax(sb->path)) return 0 ;
+  return arrp(sb->path, i, SyngPath) ;
+}
+
 /************** main ****************/
 
 #ifdef TEST

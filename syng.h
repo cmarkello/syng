@@ -59,6 +59,19 @@ void           syngBWTpathDestroy (SyngBWTpath *sbp) ;
 void           syngBWTstat (SyngBWT *sb) ;
 bool           syngBWTlocFind (SyngBWT *sb, I64 loc, I64 *file, I64 *path, I64 *offset) ;
 
+// accessors for syngview - iterate over graph structure
+I64            syngBWTnodeMax (SyngBWT *sb) ;          // number of nodes (1-based, so max index)
+bool           syngBWTnodeExists (SyngBWT *sb, I64 i) ; // true if node i has edges
+int            syngBWTnodeOutDegree (SyngBWT *sb, I64 i) ; // number of distinct out-edges from +i
+int            syngBWTnodeInDegree (SyngBWT *sb, I64 i) ;  // number of distinct in-edges to +i
+// get j-th out-edge of +i: returns adjacent node (neg if reversed), offset, count
+bool           syngBWTnodeOutEdge (SyngBWT *sb, I64 i, int j, I32 *adj, U32 *offset, I64 *count) ;
+// get j-th in-edge of +i: returns adjacent node (neg if reversed), offset, count
+bool           syngBWTnodeInEdge (SyngBWT *sb, I64 i, int j, I32 *adj, U32 *offset, I64 *count) ;
+// path accessors
+I64            syngBWTpathCount (SyngBWT *sb) ;          // number of paths
+SyngPath      *syngBWTpathInfo (SyngBWT *sb, I64 i) ;   // get path info for path i (0-based)
+
 static char *syngSchemaText =
   "1 3 def 1 0               schema for syng\n"
   ".\n"
