@@ -5,7 +5,7 @@
  * Description:
  * Exported functions:
  * HISTORY:
- * Last edited: Mar 12 22:48 2026 (rd109)
+ * Last edited: Mar 24 21:43 2026 (rd109)
  * Created: Mon May 29 08:19:18 2023 (rd109)
  *-------------------------------------------------------------------
  */
@@ -20,10 +20,18 @@
 #define SYNG_VERSION  "2.1"
 
 typedef struct {
+  U32 file ;
+  U32 path ;
+  U64 length ;
+} SyngPath ;
+
+typedef struct {
   int   fixedLen ;
   Array node ;   // of Node - only defined in syngbwt.c
   Array status ; // of U8 bitFlags
   Array length ; // of I32, if fixedLen == 0
+  Array path ;   // of SyngPath, one per path in the gbwt file
+  void *loc ;    // opaque handle: SyngBWTloc interval structure (private to syngbwt3.c)
   // the next annoying set of properties are to manage start counts
   Hash  startHash ;      // for nodes with starts - good if relatively few starts compared to nodes
   Array startHashCount ; // of I32, indexed by hash value
@@ -50,6 +58,7 @@ SyngBWTpath   *syngBWTmatchStart (SyngBWT *sb,     I32 startNode, U32 *high) ;
 bool           syngBWTmatchNext (SyngBWTpath *sbp, I32 nextNode, U32 nextOff, U32 *low, U32 *high) ;
 void           syngBWTpathDestroy (SyngBWTpath *sbp) ;
 void           syngBWTstat (SyngBWT *sb) ;
+bool           syngBWTlocFind (SyngBWT *sb, I64 loc, I64 *file, I64 *path, I64 *offset) ;
 
 // Annotation-aware spliced pangenome graph structures
 // Inspired by vg rna (https://github.com/vgteam/vg/wiki/Transcriptomic-analyses)
@@ -119,6 +128,7 @@ static char *syngSchemaText =
   "D c 1 8 INT_LIST          GBWT -: list of run-length counts\n"
   ".\n"
   "O P 3 3 INT 3 INT 3 INT   path: length in bp, source file number, sequence number in file\n"
+  "D I 1 6 STRING            identifier of path - used to return mapping information\n"
   "D Z 4 3 INT 3 INT 3 INT 3 INT   GBWT path: starting node, pos, count, then length in nodes\n"
   "D z 1 8 INT_LIST          alternative explicit list of node ids (-ve if reversed)\n"
   "D o 1 8 INT_LIST          if z, then offsets of the nodes from start of sequence, 1:1 with z\n"
@@ -135,10 +145,12 @@ static char *syngSchemaText =
   "D M 1 6 STRING            maximum count in any input - (1..127)\n"
   ".\n"
   "P 3 map                   MAP\n"
-  "P 3 ref                   REFERENCE INFORMATION\n"
-  "O N 1 6 STRING            name of sequence, e.g. chr1\n"
-  "O I 1 8 INT_LIST          list of indexes into name table for each sync: 0 if missing, -ve if RC\n"
-  "D P 1 8 INT_LIST          positions in sequence\n"
+  "O S 2 3 INT 3 INT         query sequence: index in source file (1-based) length\n"
+  "D I 1 6 STRING            identifier from source file (if requested)\n"
+  "D F 1 4 CHAR              filter: Z zero-length, Q quality, G poly-G (Illumina bad read)\n"
+  "D M 3 3 INT 3 INT 3 INT   mem: start, end (0-based), count\n"
+  "D X 2 3 INT 3 DNA         missing syncmer not found in graph: start coordinate, sequence\n"
+  "D U 3 3 INT 3 INT 3 INT   unique mapping: file, path, offset (negative offset = reverse)"
   ".\n"
   "P 6 sgtxom                SPLICED PANGENOME TRANSCRIPTOME\n"
   "S 4 stxn                  spliced transcriptome: annotations over a gbwt\n"
