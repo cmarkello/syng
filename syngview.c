@@ -486,41 +486,58 @@ int main (int argc, char *argv[])
             curOffsets = oneIntList(ofTx) ;
             // now we have a complete transcript - write walk
             if (curNNodes > 0 && curTxId)
-              { // check if any node is in region
-                bool inRegion = false ;
-                int i ;
-                for (i = 0 ; i < curNNodes ; ++i)
-                  if (nodeInRegion(curNodes[i], &region)) { inRegion = true ; break ; }
-                if (inRegion)
-                  { // compute walk coordinates
+              { // find the sub-range of nodes that are in the region
+                int clipFirst = 0, clipLast = curNNodes - 1 ;
+                if (region.isActive)
+                  { clipFirst = -1 ; clipLast = -1 ;
+                    int i ;
+                    for (i = 0 ; i < curNNodes ; ++i)
+                      if (nodeInRegion(curNodes[i], &region))
+                        { if (clipFirst < 0) clipFirst = i ;
+                          clipLast = i ;
+                        }
+                  }
+                if (clipFirst >= 0)
+                  { int clipN = clipLast - clipFirst + 1 ;
                     I64 walkStart = 0, walkEnd = 0 ;
                     char *walkChr = curGeneId ? curGeneId : "unknown" ;
                     if (nodePosMap)
-                      { // use real genomic coordinates from first and last node
-                        I64 firstAbs = (curNodes[0] >= 0) ? curNodes[0] : -curNodes[0] ;
-                        I64 lastAbs = (curNodes[curNNodes-1] >= 0) ?
-                                       curNodes[curNNodes-1] : -curNodes[curNNodes-1] ;
+                      { I64 fAbs = (curNodes[clipFirst] >= 0) ?
+                                    curNodes[clipFirst] : -curNodes[clipFirst] ;
+                        I64 lAbs = (curNodes[clipLast] >= 0) ?
+                                    curNodes[clipLast] : -curNodes[clipLast] ;
                         I64 pos ;
-                        if (nodePosMapFind(nodePosMap, firstAbs, &pos))
+                        if (nodePosMapFind(nodePosMap, fAbs, &pos))
                           walkStart = pos ;
-                        if (nodePosMapFind(nodePosMap, lastAbs, &pos))
+                        if (nodePosMapFind(nodePosMap, lAbs, &pos))
                           walkEnd = pos + syncmerLen ;
+                        if (walkStart > walkEnd)
+                          { I64 tmp = walkStart ; walkStart = walkEnd ; walkEnd = tmp ; }
                         if (region.isActive) walkChr = region.chrName ;
+                        // skip walk if coordinates fall outside the region window
+                        if (region.isActive &&
+                            (walkEnd <= region.startPos || walkStart >= region.endPos))
+                          goto skipTxWalk ;
                       }
                     else
-                      { I64 bpLen = 0 ;
-                        for (i = 0 ; i < curNNodes ; ++i) bpLen += curOffsets[i] ;
+                      { int i ;
+                        I64 bpLen = 0 ;
+                        for (i = clipFirst ; i <= clipLast ; ++i) bpLen += curOffsets[i] ;
                         walkEnd = bpLen + syncmerLen ;
                       }
-                    I32 *nodes32 = new(curNNodes, I32) ;
-                    for (i = 0 ; i < curNNodes ; ++i) nodes32[i] = curNodes[i] ;
-                    char sampleBuf[64] ;
-                    snprintf(sampleBuf, sizeof(sampleBuf), "sample%d", curSample) ;
-                    gfaWriteWalk(gfaFile, sampleBuf, curSample,
-                                 walkChr, walkStart, walkEnd,
-                                 curNNodes, nodes32) ;
-                    newFree(nodes32, curNNodes, I32) ;
-                    ++nWalks ;
+                    { I32 *nodes32 = new(clipN, I32) ;
+                      int i ;
+                      for (i = 0 ; i < clipN ; ++i)
+                        nodes32[i] = curNodes[clipFirst + i] ;
+                      char sampleBuf[64] ;
+                      snprintf(sampleBuf, sizeof(sampleBuf), "sample%d", curSample) ;
+                      gfaWriteWalk(gfaFile, sampleBuf, curSample,
+                                   walkChr, walkStart, walkEnd,
+                                   clipN, nodes32) ;
+                      newFree(nodes32, clipN, I32) ;
+                      ++nWalks ;
+                    }
+                  skipTxWalk: ;
                   }
               }
             curNNodes = 0 ;
@@ -575,28 +592,50 @@ int main (int argc, char *argv[])
                               ++nLinks ;
                             }
                         }
-                      // write walk
-                      I32 *nodes32 = new(len, I32) ;
-                      for (i = 0 ; i < len ; ++i) nodes32[i] = nodeList[i] ;
-                      char sampleBuf[64] ;
-                      snprintf(sampleBuf, sizeof(sampleBuf), "genome%d", pathSource) ;
-                      // use real coordinates if available
-                      I64 wStart = 0, wEnd = pathLen ;
-                      char *wChr = "chr" ;
-                      if (nodePosMap && len > 0)
-                        { I64 fAbs = (nodeList[0] >= 0) ? nodeList[0] : -nodeList[0] ;
-                          I64 lAbs = (nodeList[len-1] >= 0) ? nodeList[len-1] : -nodeList[len-1] ;
-                          I64 pos ;
-                          if (nodePosMapFind(nodePosMap, fAbs, &pos))
-                            wStart = pos ;
-                          if (nodePosMapFind(nodePosMap, lAbs, &pos))
-                            wEnd = pos + syncmerLen ;
-                          if (region.isActive) wChr = region.chrName ;
+                      // write walk - clip to region if active
+                      int cFirst = 0, cLast = len - 1 ;
+                      if (region.isActive)
+                        { cFirst = -1 ; cLast = -1 ;
+                          for (i = 0 ; i < len ; ++i)
+                            if (nodeInRegion(nodeList[i], &region))
+                              { if (cFirst < 0) cFirst = i ;
+                                cLast = i ;
+                              }
                         }
-                      gfaWriteWalk(gfaFile, sampleBuf, pathSource,
-                                   wChr, wStart, wEnd, len, nodes32) ;
-                      newFree(nodes32, len, I32) ;
-                      ++nWalks ;
+                      if (cFirst >= 0)
+                        { int cN = cLast - cFirst + 1 ;
+                          I64 wStart = 0, wEnd = pathLen ;
+                          char *wChr = "chr" ;
+                          bool skipPath = false ;
+                          if (nodePosMap && cN > 0)
+                            { I64 fAbs = (nodeList[cFirst] >= 0) ?
+                                          nodeList[cFirst] : -nodeList[cFirst] ;
+                              I64 lAbs = (nodeList[cLast] >= 0) ?
+                                          nodeList[cLast] : -nodeList[cLast] ;
+                              I64 pos ;
+                              if (nodePosMapFind(nodePosMap, fAbs, &pos))
+                                wStart = pos ;
+                              if (nodePosMapFind(nodePosMap, lAbs, &pos))
+                                wEnd = pos + syncmerLen ;
+                              if (wStart > wEnd)
+                                { I64 tmp = wStart ; wStart = wEnd ; wEnd = tmp ; }
+                              if (region.isActive) wChr = region.chrName ;
+                              if (region.isActive &&
+                                  (wEnd <= region.startPos || wStart >= region.endPos))
+                                skipPath = true ;
+                            }
+                          if (!skipPath)
+                            { I32 *nodes32 = new(cN, I32) ;
+                              for (i = 0 ; i < cN ; ++i)
+                                nodes32[i] = nodeList[cFirst + i] ;
+                              char sampleBuf[64] ;
+                              snprintf(sampleBuf, sizeof(sampleBuf), "genome%d", pathSource) ;
+                              gfaWriteWalk(gfaFile, sampleBuf, pathSource,
+                                           wChr, wStart, wEnd, cN, nodes32) ;
+                              newFree(nodes32, cN, I32) ;
+                              ++nWalks ;
+                            }
+                        }
                     }
                 }
               oneFileClose(ofP) ;
